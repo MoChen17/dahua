@@ -9,6 +9,8 @@ from security_eval.contracts import ModuleRequest
 from security_eval.errors import ContractError
 from security_eval.modules.task4.agentdojo_adapter import (
     AgentDojoAdapter,
+    _known_attack_model_name,
+    _OpenAICompatibilityProxy,
     _rewrite_developer_messages,
 )
 from security_eval.modules.task4.models import AdapterResult
@@ -121,6 +123,34 @@ def test_unknown_model_pipeline_keeps_real_model_for_both_defenses(
         for element in filtered_pipeline.elements
         if type(element).__name__ in {"OpenAILLM", "OpenAILLMToolFilter"}
     } == {"qwen3.7-plus"}
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "company/local-qwen",
+        "provider/vllm_parsed-qwen",
+    ],
+)
+def test_model_ids_containing_known_names_still_use_generic_compatibility(
+    model_id,
+    run_context,
+) -> None:
+    generic_context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": model_id})()}
+    )
+
+    pipeline = AgentDojoAdapter._pipeline(generic_context, "none")
+    llm = next(
+        element
+        for element in pipeline.elements
+        if type(element).__name__ == "OpenAILLM"
+    )
+
+    assert _known_attack_model_name(model_id) is None
+    assert pipeline.name == "local"
+    assert llm.model == model_id
+    assert isinstance(llm.client, _OpenAICompatibilityProxy)
 
 
 def test_known_model_pipeline_routing_is_unchanged(run_context) -> None:

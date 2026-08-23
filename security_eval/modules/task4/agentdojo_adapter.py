@@ -307,14 +307,9 @@ def _known_attack_model_name(model_id: str) -> str | None:
     normalized = model_id.strip()
     if normalized in ATTACK_MODEL_ALIASES:
         return ATTACK_MODEL_ALIASES[normalized]
-    return next(
-        (
-            supported
-            for supported in SUPPORTED_ATTACK_MODEL_NAMES
-            if supported in normalized
-        ),
-        None,
-    )
+    if normalized in SUPPORTED_ATTACK_MODEL_NAMES:
+        return normalized
+    return None
 
 
 def _rewrite_developer_messages(messages: Any) -> list[Any]:
