@@ -51,6 +51,41 @@ ATTACK_MODEL_ALIASES = {
 }
 
 
+class _ChatCompletionsCompatibilityProxy:
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        messages = kwargs.get("messages")
+        if messages is not None:
+            kwargs = {
+                **kwargs,
+                "messages": _rewrite_developer_messages(messages),
+            }
+        return self._delegate.create(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
+class _ChatCompatibilityProxy:
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self.completions = _ChatCompletionsCompatibilityProxy(delegate.completions)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
+class _OpenAICompatibilityProxy:
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self.chat = _ChatCompatibilityProxy(delegate.chat)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
 class AgentDojoAdapter:
     """Run one isolated workspace case and return only serializable evidence."""
 
@@ -175,7 +210,7 @@ class AgentDojoAdapter:
         remaining_seconds = max(
             1.0, (deadline - datetime.now(timezone.utc)).total_seconds()
         )
-        client = openai.OpenAI(
+        raw_client = openai.OpenAI(
             api_key=target.api_key,
             base_url=target.base_url,
             timeout=min(
@@ -183,11 +218,19 @@ class AgentDojoAdapter:
             ),
         )
         model = context.settings.agentdojo_model
+        attack_model_name = resolve_attack_model_name(model)
+        uses_generic_identity = _known_attack_model_name(model) is None
+        client = (
+            _OpenAICompatibilityProxy(raw_client)
+            if uses_generic_identity
+            else raw_client
+        )
         llm = OpenAILLM(client, model)
-        # Keep the real API model ID on OpenAILLM, but give AgentDojo a
-        # separately normalized pipeline name for its attack templates.
-        llm.name = resolve_attack_model_name(model)
-        return AgentPipeline.from_config(
+        # AgentDojo reuses llm.name as the ToolFilter API model. Unknown
+        # targets must therefore retain their real API model until after the
+        # pipeline is built; only pipeline.name is the generic attack identity.
+        llm.name = model if uses_generic_identity else attack_model_name
+        pipeline = AgentPipeline.from_config(
             PipelineConfig(
                 llm=llm,
                 model_id=None,
@@ -196,6 +239,13 @@ class AgentDojoAdapter:
                 system_message=None,
             )
         )
+        if uses_generic_identity:
+            pipeline.name = (
+                attack_model_name
+                if defense == "none"
+                else f"{attack_model_name}-{defense}"
+            )
+        return pipeline
 
     @staticmethod
     def _capture_logger():
@@ -241,16 +291,40 @@ def resolve_attack_model_name(model_id: str) -> str:
     """Resolve an API model ID to a name AgentDojo 0.1.35 can recognize."""
 
     normalized = model_id.strip()
+    if not normalized:
+        raise DependencyError("AgentDojo model is not configured")
+    known_name = _known_attack_model_name(normalized)
+    if known_name is not None:
+        return known_name
+    # AgentDojo only uses this normalized name to choose how the attack
+    # template addresses the victim model. The OpenAILLM above still receives
+    # the original API model ID, so arbitrary OpenAI-compatible targets can be
+    # evaluated without rewriting their configured model name.
+    return "local"
+
+
+def _known_attack_model_name(model_id: str) -> str | None:
+    normalized = model_id.strip()
     if normalized in ATTACK_MODEL_ALIASES:
         return ATTACK_MODEL_ALIASES[normalized]
-    for supported in SUPPORTED_ATTACK_MODEL_NAMES:
-        if supported in normalized:
-            return supported
-    aliases = ", ".join(sorted(ATTACK_MODEL_ALIASES))
-    raise DependencyError(
-        "AgentDojo cannot identify the configured model for attack templates; "
-        f"use a supported snapshot name or one of these aliases: {aliases}"
+    return next(
+        (
+            supported
+            for supported in SUPPORTED_ATTACK_MODEL_NAMES
+            if supported in normalized
+        ),
+        None,
     )
+
+
+def _rewrite_developer_messages(messages: Any) -> list[Any]:
+    rewritten: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            rewritten.append({**message, "role": "system"})
+        else:
+            rewritten.append(message)
+    return rewritten
 
 
 def _environment_diff(before: Any, after: Any) -> dict[str, Any]:

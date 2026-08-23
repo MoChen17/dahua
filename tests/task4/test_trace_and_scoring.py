@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from security_eval.contracts import CaseResult
-from security_eval.errors import DependencyError, ParseError
+from security_eval.errors import ParseError
 from security_eval.modules.task4.agentdojo_adapter import (
     _normalized_security,
     resolve_attack_model_name,
@@ -100,9 +100,19 @@ def test_agentdojo_attack_model_name_supports_alias_and_snapshot() -> None:
     )
 
 
-def test_agentdojo_attack_model_name_rejects_unknown_custom_model() -> None:
-    with pytest.raises(DependencyError, match="cannot identify"):
-        resolve_attack_model_name("company/custom-agent-model")
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "qwen3.7-plus",
+        "deepseek-chat",
+        "company/custom-agent-model",
+        "provider/competition-model-2026",
+    ],
+)
+def test_agentdojo_attack_model_name_falls_back_for_unknown_models(
+    model_id,
+) -> None:
+    assert resolve_attack_model_name(model_id) == "local"
 
 
 def test_dos_interruption_and_safe_trace_directions() -> None:
