@@ -6,8 +6,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from security_eval.contracts import ModuleRequest
-from security_eval.errors import ContractError, DependencyError
-from security_eval.modules.task4.agentdojo_adapter import AgentDojoAdapter
+from security_eval.errors import ContractError
+from security_eval.modules.task4.agentdojo_adapter import (
+    AgentDojoAdapter,
+    _known_attack_model_name,
+    _OpenAICompatibilityProxy,
+    _rewrite_developer_messages,
+)
 from security_eval.modules.task4.models import AdapterResult
 from security_eval.modules.task4.module import Task4Module
 
@@ -82,7 +87,7 @@ def test_unknown_benchmark_version_is_rejected(run_context) -> None:
         module.run(run_context, unsupported)
 
 
-def test_adapter_validate_rejects_unknown_model_before_cases(
+def test_adapter_validate_accepts_unknown_openai_compatible_model(
     monkeypatch, run_context
 ) -> None:
     monkeypatch.setattr("importlib.metadata.version", lambda _: "0.1.35")
@@ -94,8 +99,89 @@ def test_adapter_validate_rejects_unknown_model_before_cases(
             )()
         }
     )
-    with pytest.raises(DependencyError, match="cannot identify"):
-        AgentDojoAdapter().validate(bad_context)
+    AgentDojoAdapter().validate(bad_context)
+
+
+def test_unknown_model_pipeline_keeps_real_model_for_both_defenses(
+    run_context,
+) -> None:
+    unknown_context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": "qwen3.7-plus"})()}
+    )
+    none_pipeline = AgentDojoAdapter._pipeline(unknown_context, "none")
+    filtered_pipeline = AgentDojoAdapter._pipeline(unknown_context, "tool_filter")
+
+    assert none_pipeline.name == "local"
+    assert filtered_pipeline.name == "local-tool_filter"
+    assert {
+        element.model
+        for element in none_pipeline.elements
+        if type(element).__name__ == "OpenAILLM"
+    } == {"qwen3.7-plus"}
+    assert {
+        element.model
+        for element in filtered_pipeline.elements
+        if type(element).__name__ in {"OpenAILLM", "OpenAILLMToolFilter"}
+    } == {"qwen3.7-plus"}
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "company/local-qwen",
+        "provider/vllm_parsed-qwen",
+    ],
+)
+def test_model_ids_containing_known_names_still_use_generic_compatibility(
+    model_id,
+    run_context,
+) -> None:
+    generic_context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": model_id})()}
+    )
+
+    pipeline = AgentDojoAdapter._pipeline(generic_context, "none")
+    llm = next(
+        element
+        for element in pipeline.elements
+        if type(element).__name__ == "OpenAILLM"
+    )
+
+    assert _known_attack_model_name(model_id) is None
+    assert pipeline.name == "local"
+    assert llm.model == model_id
+    assert isinstance(llm.client, _OpenAICompatibilityProxy)
+
+
+def test_known_model_pipeline_routing_is_unchanged(run_context) -> None:
+    known_context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": "gpt-4o-mini"})()}
+    )
+    pipeline = AgentDojoAdapter._pipeline(known_context, "tool_filter")
+
+    assert pipeline.name == "gpt-4o-mini-2024-07-18-tool_filter"
+    models = {
+        type(element).__name__: element.model
+        for element in pipeline.elements
+        if hasattr(element, "model")
+    }
+    assert models["OpenAILLM"] == "gpt-4o-mini"
+    assert models["OpenAILLMToolFilter"] == "gpt-4o-mini-2024-07-18"
+
+
+def test_generic_model_rewrites_only_developer_roles() -> None:
+    original = [
+        {"role": "developer", "content": "system instructions"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    rewritten = _rewrite_developer_messages(original)
+
+    assert rewritten == [
+        {"role": "system", "content": "system instructions"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert original[0]["role"] == "developer"
 
 
 def test_benchmark_quick_returns_contract_and_sanitized_artifacts(run_context) -> None:
