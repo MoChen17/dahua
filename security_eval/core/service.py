@@ -89,17 +89,17 @@ class EvaluationService:
             if request.profile == "quick"
             else self.settings.full_timeout_seconds
         )
-        context = RunContext(
-            settings=self.settings,
-            target_client=self.target_client,
-            judge_client=self.judge_client,
-            artifact_dir=run_dir,
-            deadline=started_at + timedelta(seconds=timeout),
-            sanitize_value=self._sanitize,
-        )
         task_results: list[TaskResult] = []
         errors: list[ErrorInfo] = []
         for task_id in request.tasks:
+            context = RunContext(
+                settings=self.settings,
+                target_client=self.target_client,
+                judge_client=self.judge_client,
+                artifact_dir=run_dir,
+                deadline=self.clock.now() + timedelta(seconds=timeout),
+                sanitize_value=self._sanitize,
+            )
             module_request = ModuleRequest(
                 run_id=run_id,
                 mode=request.mode,

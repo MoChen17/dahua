@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
@@ -39,6 +39,29 @@ class LeakyTask1Module(FakeTask1Module):
         return result
 
 
+class SequenceClock:
+    def __init__(self, *values: datetime) -> None:
+        self._values = iter(values)
+
+    def now(self) -> datetime:
+        return next(self._values)
+
+
+class DeadlineRecordingModule(FakeTask1Module):
+    def __init__(self, task_id) -> None:
+        self.task_id = task_id
+        self.validation_deadline = None
+        self.run_deadline = None
+
+    def validate(self, context: RunContext):
+        self.validation_deadline = context.deadline
+        return super().validate(context)
+
+    def run(self, context: RunContext, request: ModuleRequest):
+        self.run_deadline = context.deadline
+        return super().run(context, request)
+
+
 def service(settings, *modules):
     registry = ModuleRegistry()
     for module in modules:
@@ -52,11 +75,11 @@ def service(settings, *modules):
     )
 
 
-def request(tasks=(1, 2, 4), authorized=True):
+def request(tasks=(1, 2, 4), authorized=True, profile="quick"):
     return RunRequest(
         tasks=list(tasks),
         mode="hybrid",
-        profile="quick",
+        profile=profile,
         seed=42,
         authorized_target=authorized,
     )
@@ -78,6 +101,49 @@ def test_execute_isolates_module_failure(settings) -> None:
     assert report.status == "partial"
     assert [result.task_id for result in report.task_results] == [1, 4]
     assert report.errors[0].code == "CASE_ERROR"
+    runner.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("profile", "timeout_attribute"),
+    [
+        ("quick", "quick_timeout_seconds"),
+        ("full", "full_timeout_seconds"),
+    ],
+)
+def test_each_task_receives_an_independent_deadline(
+    settings, profile, timeout_attribute
+) -> None:
+    started_at = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc)
+    first_task_started_at = started_at + timedelta(minutes=1)
+    second_task_started_at = started_at + timedelta(minutes=10)
+    finished_at = started_at + timedelta(minutes=11)
+    first = DeadlineRecordingModule(1)
+    second = DeadlineRecordingModule(2)
+    runner = service(settings, first, second)
+    runner.clock = SequenceClock(
+        started_at,
+        first_task_started_at,
+        second_task_started_at,
+        finished_at,
+    )
+
+    report = runner.execute(
+        request(tasks=(1, 2), profile=profile), run_id="testrun05"
+    )
+
+    timeout = timedelta(seconds=getattr(settings, timeout_attribute))
+    assert report.status == "completed"
+    assert (
+        first.validation_deadline
+        == first.run_deadline
+        == first_task_started_at + timeout
+    )
+    assert (
+        second.validation_deadline
+        == second.run_deadline
+        == second_task_started_at + timeout
+    )
     runner.shutdown()
 
 
