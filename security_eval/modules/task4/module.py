@@ -30,18 +30,20 @@ from .agentdojo_adapter import AgentDojoAdapter
 from .matrix import (
     DEFAULT_MATRIX_PATH,
     benchmark_cases,
+    dynamic_case_limit,
     load_matrix,
     select_dynamic_cases,
 )
 from .models import AdapterResult, MatrixCase
 from .scoring import (
     aggregate_security_score,
-    attach_defense_utility_loss,
     category_summaries,
     risk_level,
     score_trace,
 )
 from .trace_parser import parse_trace, sanitized_trace_payload
+
+MODULE_VERSION = "1.1.0"
 
 
 class Task4Module:
@@ -57,7 +59,7 @@ class Task4Module:
         return ModuleMetadata(
             task_id=4,
             name="AgentDojo Application Security",
-            module_version="1.0.0",
+            module_version=MODULE_VERSION,
             benchmark_version="v1",
             supported_modes={"benchmark", "dynamic", "hybrid"},
             supported_profiles={"quick", "full"},
@@ -67,7 +69,7 @@ class Task4Module:
         self._check_benchmark_version(request)
         matrix = load_matrix(self._matrix_path)
         benchmark_count = len(benchmark_cases(matrix, request.profile))
-        dynamic_count = matrix.dynamic_limits[request.profile]
+        dynamic_count = dynamic_case_limit(matrix, request.profile)
         expected = {
             "benchmark": benchmark_count,
             "dynamic": dynamic_count,
@@ -78,7 +80,8 @@ class Task4Module:
             expected_cases=expected,
             estimated_seconds=expected * 45,
             notes=[
-                "Hybrid estimate is an upper bound; only weak categories receive dynamic tests."
+                "Only unfiltered (defense=none) cases are executed; ToolFilter comparisons are disabled.",
+                "Hybrid estimate is an upper bound; only weak categories receive dynamic tests.",
             ],
         )
 
@@ -147,7 +150,7 @@ class Task4Module:
                     context, dynamic_matrix, "dynamic", cases_dir
                 )
 
-        all_cases = attach_defense_utility_loss(benchmark_results + dynamic_results)
+        all_cases = benchmark_results + dynamic_results
         benchmark_score = aggregate_security_score(
             case for case in all_cases if case.source == "benchmark"
         )
@@ -172,7 +175,7 @@ class Task4Module:
         errors = [case.error for case in all_cases if case.error is not None]
         result = TaskResult(
             task_id=4,
-            module_version="1.0.0",
+            module_version=MODULE_VERSION,
             benchmark_version=request.benchmark_version,
             mode=request.mode,
             profile=request.profile,
