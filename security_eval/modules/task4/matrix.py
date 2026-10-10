@@ -55,9 +55,21 @@ def load_matrix(
 
 
 def benchmark_cases(matrix: MatrixConfig, profile: str) -> list[MatrixCase]:
-    if profile == "quick":
-        return [case for case in matrix.cases if case.quick]
-    return list(matrix.cases)
+    """Execute only the unfiltered subset of the unchanged, verified v1 bank.
+
+    The frozen manifest describes the stored bank, including historical defense
+    comparisons. It is not the execution count for module 1.1.0.
+    """
+    return [
+        case
+        for case in matrix.cases
+        if case.defense == "none" and (profile != "quick" or case.quick)
+    ]
+
+
+def dynamic_case_limit(matrix: MatrixConfig, profile: str) -> int:
+    """Retain the original combination budget without defense duplicates."""
+    return matrix.dynamic_limits[profile] // 2
 
 
 def select_dynamic_cases(
@@ -69,7 +81,7 @@ def select_dynamic_cases(
     available_user_tasks: Iterable[str] | None = None,
     available_injection_tasks: Iterable[str] | None = None,
 ) -> list[MatrixCase]:
-    """Select defense-paired combinations not present in the frozen matrix."""
+    """Select unfiltered combinations not present in the frozen matrix."""
 
     fixed_pairs = {
         (case.user_task_id, case.injection_task_id, case.attack)
@@ -97,7 +109,7 @@ def select_dynamic_cases(
         ) not in fixed_pairs:
             candidates.append((user, "injection_task_0", "dos", "dos"))
 
-    pair_limit = matrix.dynamic_limits[profile] // 2
+    case_limit = dynamic_case_limit(matrix, profile)
     rng = random.Random(seed)
     buckets: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
     for candidate in candidates:
@@ -106,10 +118,10 @@ def select_dynamic_cases(
         rng.shuffle(bucket)
     selected: list[tuple[str, str, str, str]] = []
     category_order = sorted(buckets)
-    while len(selected) < pair_limit and category_order:
+    while len(selected) < case_limit and category_order:
         next_order: list[str] = []
         for category in category_order:
-            if len(selected) >= pair_limit:
+            if len(selected) >= case_limit:
                 break
             bucket = buckets[category]
             if bucket:
@@ -119,16 +131,15 @@ def select_dynamic_cases(
         category_order = next_order
     cases: list[MatrixCase] = []
     for index, (user, injection, attack, category) in enumerate(selected):
-        for defense in ("none", "tool_filter"):
-            cases.append(
-                MatrixCase(
-                    case_id=f"t4-dyn-{index:02d}-{user}-{injection}-{attack}-{defense}",
-                    user_task_id=user,
-                    injection_task_id=injection,
-                    attack=attack,
-                    defense=defense,
-                    category=category,
-                    scenario=f"Seeded dynamic {attack} attack with {defense} defense",
-                )
+        cases.append(
+            MatrixCase(
+                case_id=f"t4-dyn-{index:02d}-{user}-{injection}-{attack}-none",
+                user_task_id=user,
+                injection_task_id=injection,
+                attack=attack,
+                defense="none",
+                category=category,
+                scenario=f"Seeded dynamic {attack} attack with none defense",
             )
+        )
     return cases

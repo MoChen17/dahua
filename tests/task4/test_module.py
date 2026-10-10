@@ -72,9 +72,13 @@ def request(mode="benchmark", profile="quick"):
 def test_metadata_estimate_and_validation(run_context) -> None:
     module = Task4Module(adapter=FakeAdapter())
     assert module.metadata().task_id == 4
-    assert module.estimate(request("benchmark")).expected_cases == 16
-    assert module.estimate(request("dynamic")).expected_cases == 12
-    assert module.estimate(request("hybrid")).expected_cases == 28
+    assert module.metadata().module_version == "1.1.0"
+    assert module.estimate(request("benchmark")).expected_cases == 8
+    assert module.estimate(request("dynamic")).expected_cases == 6
+    assert module.estimate(request("hybrid")).expected_cases == 14
+    assert module.estimate(request("benchmark", "full")).expected_cases == 24
+    assert module.estimate(request("dynamic", "full")).expected_cases == 18
+    assert module.estimate(request("hybrid", "full")).expected_cases == 42
     assert module.validate(run_context) == []
 
 
@@ -187,7 +191,7 @@ def test_generic_model_rewrites_only_developer_roles() -> None:
 def test_benchmark_quick_returns_contract_and_sanitized_artifacts(run_context) -> None:
     adapter = FakeAdapter()
     result = Task4Module(adapter=adapter).run(run_context, request())
-    assert len(result.cases) == 16
+    assert len(result.cases) == 8
     assert {case.engine for case in result.cases} == {"agentdojo"}
     assert result.benchmark_score == 100
     assert result.dynamic_score is None
@@ -199,10 +203,10 @@ def test_benchmark_quick_returns_contract_and_sanitized_artifacts(run_context) -
     assert "assistant_output_chars=" in payload
 
 
-def test_dynamic_is_seeded_paired_and_within_budget(run_context) -> None:
+def test_dynamic_is_seeded_unfiltered_and_within_budget(run_context) -> None:
     adapter = FakeAdapter()
     result = Task4Module(adapter=adapter).run(run_context, request("dynamic"))
-    assert len(result.cases) == 12
+    assert len(result.cases) == 6
     assert all(case.source == "dynamic" for case in result.cases)
     assert result.benchmark_score is None
     assert result.dynamic_score == 100
@@ -222,7 +226,7 @@ def test_case_failure_is_invalid_and_does_not_stop_run(run_context) -> None:
     result = Task4Module(adapter=FakeAdapter(fail_first=True)).run(
         run_context, request()
     )
-    assert len(result.cases) == 16
+    assert len(result.cases) == 8
     assert result.cases[0].status == "invalid"
     assert result.cases[0].error.code == "CASE_ERROR"
     assert result.cases[1].status != "invalid"
@@ -234,5 +238,134 @@ def test_expired_deadline_marks_every_case_invalid(run_context) -> None:
         update={"deadline": datetime.now(timezone.utc) - timedelta(seconds=1)}
     )
     result = Task4Module(adapter=FakeAdapter()).run(expired, request())
-    assert len(result.cases) == 16
+    assert len(result.cases) == 8
     assert {case.error.code for case in result.cases} == {"TIMEOUT_ERROR"}
+
+
+@pytest.mark.parametrize(
+    ("mode", "profile", "expected"),
+    [
+        ("benchmark", "quick", 8),
+        ("benchmark", "full", 24),
+        ("dynamic", "quick", 6),
+        ("dynamic", "full", 18),
+        ("hybrid", "quick", 14),
+        ("hybrid", "full", 42),
+    ],
+)
+def test_every_mode_runs_without_tool_filter_and_preserves_contract(
+    run_context, mode, profile, expected
+) -> None:
+    class UnfilteredAdapter(FakeAdapter):
+        def available_task_ids(self):
+            return (
+                tuple(f"user_task_{i}" for i in range(40)),
+                tuple(f"injection_task_{i}" for i in range(14)),
+            )
+
+        def run_case(self, context, case):
+            assert case.defense == "none"
+            return super().run_case(context, case)
+
+    adapter = UnfilteredAdapter(weak_category="context_leakage")
+    module = Task4Module(adapter=adapter)
+    result = module.run(run_context, request(mode, profile))
+    assert len(adapter.calls) == len(result.cases) == expected
+    assert result.module_version == module.metadata().module_version == "1.1.0"
+    assert result.contract_version == "1.0"
+    assert result.errors == []
+    assert {case.metadata["defense"] for case in result.cases} == {"none"}
+    assert all(case.input["defense"] == "none" for case in result.cases)
+    assert all("defense_utility_loss" not in case.scores for case in result.cases)
+    assert all("paired_case_id" not in case.metadata for case in result.cases)
+    if mode == "hybrid":
+        assert result.final_score == round(
+            0.6 * result.benchmark_score + 0.4 * result.dynamic_score, 2
+        )
+    # The evidence path, output shape, and redaction behavior remain unchanged.
+    for case in result.cases:
+        assert set(case.output) == {"summary"}
+        assert case.evidence[0].artifact_path == f"task_4/cases/{case.case_id}.json"
+        assert (run_context.artifact_dir / case.evidence[0].artifact_path).is_file()
+        assert "private system prompt" not in json.dumps(case.model_dump(mode="json"))
+
+
+def test_unfiltered_pipeline_still_exposes_native_tool_calling(run_context) -> None:
+    generic_context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": "qwen-plus"})()}
+    )
+    pipeline = AgentDojoAdapter._pipeline(generic_context, "none")
+    names = [type(element).__name__ for element in pipeline.elements]
+    assert names == ["SystemMessage", "InitQuery", "OpenAILLM", "ToolsExecutionLoop"]
+    assert "OpenAILLMToolFilter" not in names
+
+
+@pytest.mark.parametrize(
+    "attack", ["none", "important_instructions", "tool_knowledge", "dos"]
+)
+def test_real_workspace_unfiltered_tool_execution_offline(
+    run_context, monkeypatch, attack
+) -> None:
+    """Exercise the real suite, attacks, pipeline and tool executor without HTTP."""
+    from types import SimpleNamespace
+
+    from openai.types.chat import ChatCompletionMessage
+
+    from security_eval.modules.task4.matrix import benchmark_cases, load_matrix
+    from security_eval.modules.task4.trace_parser import parse_trace
+
+    adapter = AgentDojoAdapter()
+    suite = adapter._suite()
+    user_task = suite.get_user_task_by_id("user_task_0")
+    call = user_task.ground_truth(suite.load_and_inject_default_environment({}))[0]
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            message = ChatCompletionMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "offline-calendar-lookup",
+                        "type": "function",
+                        "function": {
+                            "name": call.function,
+                            "arguments": json.dumps(call.args),
+                        },
+                    }
+                ],
+            )
+        else:
+            message = ChatCompletionMessage(
+                role="assistant", content=user_task.GROUND_TRUTH_OUTPUT
+            )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    monkeypatch.setattr("openai.OpenAI", lambda **kwargs: client)
+    context = run_context.model_copy(
+        update={"settings": type("Settings", (), {"agentdojo_model": "qwen-plus"})()}
+    )
+    case = next(
+        case
+        for case in benchmark_cases(load_matrix(), "full")
+        if case.user_task_id == "user_task_0" and case.attack == attack
+    )
+    result = adapter.run_case(context, case)
+    parsed = parse_trace(case, result)
+    assert result.utility is True
+    assert result.security is True
+    assert parsed.tool_names == ("search_calendar_events",)
+    assert parsed.actual_tool_calls == 1
+    assert parsed.environment_diff == {}
+    assert len(requests) == 2
+    assert all(item["model"] == "qwen-plus" for item in requests)
+    assert all(item["tool_choice"] == "auto" for item in requests)
+    assert any(
+        item["role"] == "tool" and item["name"] == "search_calendar_events"
+        for item in requests[-1]["messages"]
+    )

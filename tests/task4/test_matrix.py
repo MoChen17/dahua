@@ -11,6 +11,7 @@ from security_eval.modules.task4.matrix import (
     DEFAULT_MANIFEST_PATH,
     DEFAULT_MATRIX_PATH,
     benchmark_cases,
+    dynamic_case_limit,
     load_matrix,
     select_dynamic_cases,
 )
@@ -19,8 +20,15 @@ from security_eval.modules.task4.matrix import (
 def test_frozen_matrix_has_exact_quick_and_full_counts() -> None:
     matrix = load_matrix()
     quick = benchmark_cases(matrix, "quick")
-    assert len(quick) == 16
-    assert len(benchmark_cases(matrix, "full")) == 48
+    # The verified bank stays frozen; execution selects its unfiltered subset.
+    assert len(matrix.cases) == 48
+    assert sum(case.quick for case in matrix.cases) == 16
+    assert len(quick) == 8
+    assert len(benchmark_cases(matrix, "full")) == 24
+    assert {case.defense for case in benchmark_cases(matrix, "full")} == {"none"}
+    assert quick == [
+        case for case in matrix.cases if case.quick and case.defense == "none"
+    ]
     assert {case.user_task_id for case in matrix.cases} == {
         "user_task_0",
         "user_task_18",
@@ -38,7 +46,8 @@ def test_frozen_matrix_has_exact_quick_and_full_counts() -> None:
         "tool_knowledge",
         "dos",
     }
-    assert sum(case.category == "multi_step_hijack" for case in quick) == 2
+    assert sum(case.category == "multi_step_hijack" for case in quick) == 1
+    assert {case.category for case in quick} == {case.category for case in matrix.cases}
 
 
 def test_manifest_hash_and_counts_validate() -> None:
@@ -91,7 +100,7 @@ def test_benchmark_files_are_lf_normalized() -> None:
     assert b"\r\n" not in DEFAULT_MATRIX_PATH.read_bytes()
 
 
-def test_dynamic_selection_is_seeded_and_defense_paired() -> None:
+def test_dynamic_selection_is_seeded_and_unfiltered() -> None:
     matrix = load_matrix()
     kwargs = {
         "matrix": matrix,
@@ -113,14 +122,19 @@ def test_dynamic_selection_is_seeded_and_defense_paired() -> None:
     first = select_dynamic_cases(**kwargs)
     second = select_dynamic_cases(**kwargs)
     assert first == second
-    assert len(first) == 12
-    for index in range(0, len(first), 2):
-        assert first[index].defense == "none"
-        assert first[index + 1].defense == "tool_filter"
-        assert (
-            first[index].case_id.rsplit("-", 1)[0]
-            == first[index + 1].case_id.rsplit("-", 1)[0]
-        )
+    assert len(first) == dynamic_case_limit(matrix, "quick") == 6
+    assert dynamic_case_limit(matrix, "full") == 18
+    assert {case.defense for case in first} == {"none"}
+    assert len({case.case_id for case in first}) == len(first)
+    fixed = {
+        (case.user_task_id, case.injection_task_id, case.attack)
+        for case in matrix.cases
+        if case.attack != "none"
+    }
+    assert all(
+        (case.user_task_id, case.injection_task_id, case.attack) not in fixed
+        for case in first
+    )
 
 
 def test_injection_task_3_is_consistently_context_leakage() -> None:
