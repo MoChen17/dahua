@@ -55,6 +55,13 @@ PUBLIC_SETTING_KEYS = frozenset(
     }
 )
 
+EDITABLE_SETTINGS = (
+    "target_base_url",
+    "target_model",
+    "judge_base_url",
+    "judge_model",
+)
+
 
 # ============================================================
 # Form defaults / choices
@@ -111,9 +118,12 @@ FIELD_LABELS: dict[str, str] = {
     "tasks": "测试任务",
     "mode": "测试模式",
     "profile": "测试规模",
-    "seed": "随机种子",
-    "benchmark_version": "Benchmark 版本",
     "authorized_target": "目标授权确认",
+    "target_base_url": "目标地址",
+    "target_model": "目标模型",
+    "judge_base_url": "评判地址",
+    "judge_model": "评判模型",
+    "agentdojo_model": "模拟器模型",
 }
 
 
@@ -153,6 +163,7 @@ def create_routes_blueprint(
         for key, value in dict(public_settings or {}).items()
         if key in PUBLIC_SETTING_KEYS
     }
+    config_defaults = {key: str(safe_settings.get(key, "")) for key in EDITABLE_SETTINGS}
 
     # ========================================================
     # GET /
@@ -162,7 +173,7 @@ def create_routes_blueprint(
     def index() -> str:
         """Render the evaluation start page."""
 
-        form_values = dict(DEFAULT_FORM)
+        form_values = {**DEFAULT_FORM, **config_defaults}
 
         return _render_index(
             manager=manager,
@@ -226,9 +237,16 @@ def create_routes_blueprint(
             )
 
         try:
-            run_id = manager.start(run_request)
+            config_overrides = {
+                key: form_values[key]
+                for key in EDITABLE_SETTINGS
+                if key in request.form and form_values[key] != config_defaults[key]
+            }
+            if "target_model" in config_overrides:
+                config_overrides["agentdojo_model"] = config_overrides["target_model"]
+            run_id = manager.start(run_request, config_overrides=config_overrides)
 
-        except ConfigurationError as exc:
+        except (ConfigurationError, ValidationError) as exc:
             # Example:
             # authorized_target was not confirmed.
             return (
@@ -237,7 +255,11 @@ def create_routes_blueprint(
                     public_settings=safe_settings,
                     form_values=form_values,
                     estimate=None,
-                    errors=[str(exc)],
+                    errors=(
+                        _validation_messages(exc)
+                        if isinstance(exc, ValidationError)
+                        else [str(exc)]
+                    ),
                 ),
                 400,
             )
@@ -335,6 +357,32 @@ def create_routes_blueprint(
         response.headers["Cache-Control"] = "no-store"
 
         return response
+
+    @blueprint.get("/runs/history")
+    def run_history() -> str:
+        """List locally persisted evaluations, newest first."""
+        entries = []
+        for child in manager.storage.output_root.iterdir():
+            if not child.is_dir():
+                continue
+            try:
+                run_id = manager.storage.validate_run_id(child.name)
+                status = manager.storage.load_status(run_id)
+                report = manager.storage.load_report(run_id)
+            except (ValueError, OSError, ValidationError):
+                continue
+            if status is None and report is None:
+                continue
+            entries.append({
+                "run_id": run_id,
+                "status": report.status if report else status["status"],
+                "updated_at": status.get("updated_at") if status else None,
+                "score": report.overall_score if report else None,
+                "tasks": [TASK_NAMES_ZH[task] for task in report.request.tasks] if report else [],
+                "report_available": report is not None,
+            })
+        entries.sort(key=lambda item: item["run_id"], reverse=True)
+        return render_template("history.html", entries=entries)
 
     # ========================================================
     # GET /api/runs/<run_id>
@@ -474,14 +522,7 @@ def _form_values_from_request() -> dict[str, Any]:
             "profile",
             DEFAULT_FORM["profile"],
         ),
-        "seed": request.form.get(
-            "seed",
-            str(DEFAULT_FORM["seed"]),
-        ),
-        "benchmark_version": request.form.get(
-            "benchmark_version",
-            DEFAULT_FORM["benchmark_version"],
-        ),
+        **{key: request.form.get(key, "").strip() for key in EDITABLE_SETTINGS},
         "authorized_target": _checkbox_checked(request.form.get("authorized_target")),
     }
 
@@ -495,35 +536,13 @@ def _build_run_request(
     # seed
     # -----------------------------
 
-    seed = form_values.get(
-        "seed",
-        DEFAULT_FORM["seed"],
-    )
-
-    if isinstance(
-        seed,
-        str,
-    ):
-        seed = seed.strip()
-
-        # Empty seed means:
-        # use the default reproducible seed.
-        if not seed:
-            seed = DEFAULT_FORM["seed"]
+    seed = DEFAULT_FORM["seed"]
 
     # -----------------------------
     # benchmark version
     # -----------------------------
 
-    benchmark_version = str(
-        form_values.get(
-            "benchmark_version",
-            DEFAULT_FORM["benchmark_version"],
-        )
-    ).strip()
-
-    if not benchmark_version:
-        benchmark_version = str(DEFAULT_FORM["benchmark_version"])
+    benchmark_version = DEFAULT_FORM["benchmark_version"]
 
     # -----------------------------
     # tasks

@@ -5,6 +5,7 @@
   <p class="eyebrow">SECURITY EVALUATION CONSOLE</p>
   <h1>大模型安全综合测评</h1>
   <p class="hero-summary">从对抗攻击、内容安全与应用安全三个维度，对已授权的大模型目标执行统一测评并生成证据化报告。</p>
+  <a class="secondary button" href="{{ url_for('web.run_history') }}">查看历史评测</a>
 </section>
 
 {% if errors %}<div class="alert" role="alert"><strong>无法开始测评</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
@@ -41,10 +42,14 @@
     </div>
   </fieldset>
   <fieldset>
-    <legend>03 · 可复现参数</legend>
-    <div class="two-columns"><label>随机种子<input type="number" name="seed" min="0" max="2147483647" value="{{ form.seed }}"></label><label>Benchmark 版本<input name="benchmark_version" maxlength="50" value="{{ form.benchmark_version }}"></label></div>
+    <legend>03 · 运行配置</legend>
+    <div class="two-columns config-fields">
+      <label>目标地址<input type="text" name="target_base_url" value="{{ form.target_base_url }}" placeholder="https://example.com/v1"></label>
+      <label>目标模型<input type="text" name="target_model" value="{{ form.target_model }}"></label>
+      <label>模拟器 / 评判地址（simulator/judge_base_url）<input type="text" name="judge_base_url" value="{{ form.judge_base_url }}" placeholder="https://example.com/v1"></label>
+      <label>评判模型<input type="text" name="judge_model" value="{{ form.judge_model }}"></label>
+    </div>
   </fieldset>
-  {% if public_settings %}<details class="config"><summary>公开运行配置</summary><dl>{% for key, value in public_settings.items() %}<div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl></details>{% endif %}
   <label class="authorization"><input type="checkbox" name="authorized_target" value="on" {% if form.authorized_target %}checked{% endif %}><span>我确认该测试目标已获得授权，并理解测评可能产生对抗性请求。</span></label>
   <button class="primary" type="submit" {% if active_run %}disabled{% endif %}>开始安全测评 <span>→</span></button>
 </form>

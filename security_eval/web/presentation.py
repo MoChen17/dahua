@@ -295,12 +295,7 @@ def build_case_view(
             case.status,
         ),
         # Used later by the result page to highlight problems.
-        "is_problem": case.status
-        in {
-            "failed",
-            "partial",
-            "invalid",
-        },
+        "is_problem": case.status in {"failed", "invalid"},
         # Keep both dictionary form and list form.
         # Dictionary form is convenient for special metrics.
         # List form is convenient for generic HTML rendering.

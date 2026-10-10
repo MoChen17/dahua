@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from security_eval.contracts import Estimate, RunReport, RunRequest
+from security_eval.core.config import Settings
+from security_eval.core.service import EvaluationService
+from security_eval.core.target import JudgeClient, TargetClient
 from security_eval.errors import ConfigurationError
 from security_eval.web.storage import RunStorage, WebRunStatus
 
@@ -113,6 +116,8 @@ class RunManager:
     def start(
         self,
         request: RunRequest,
+        *,
+        config_overrides: dict[str, str] | None = None,
     ) -> str:
         """Start one authorized evaluation.
 
@@ -129,6 +134,27 @@ class RunManager:
         # would only fail later in the background thread.
         if not validated.authorized_target:
             raise ConfigurationError("Target authorization must be confirmed")
+
+        run_service = self.service
+        if isinstance(self.service, EvaluationService):
+            config_overrides = dict(config_overrides or {})
+            config_overrides["agentdojo_model"] = config_overrides.get(
+                "target_model", self.service.settings.target_model
+            )
+        if config_overrides:
+            if not isinstance(self.service, EvaluationService):
+                raise ConfigurationError("This evaluation service cannot accept runtime configuration")
+            settings = Settings.model_validate({
+                **self.service.settings.model_dump(),
+                **config_overrides,
+            })
+            run_service = EvaluationService(
+                settings=settings,
+                registry=self.service.registry,
+                target_client=TargetClient.from_settings(settings),
+                judge_client=JudgeClient.from_settings(settings),
+                clock=self.service.clock,
+            )
 
         run_id = self.storage.validate_run_id(self._run_id_factory())
 
@@ -152,6 +178,7 @@ class RunManager:
                     self._execute_run,
                     run_id,
                     validated,
+                    run_service,
                 )
 
                 self._futures[run_id] = future
@@ -319,6 +346,7 @@ class RunManager:
         self,
         run_id: str,
         request: RunRequest,
+        run_service: EvaluationExecutor,
     ) -> RunReport:
         """Execute one evaluation inside the background worker."""
 
@@ -334,7 +362,7 @@ class RunManager:
             #
             # and executes Task 1 / Task 2 / Task 4.
             report = RunReport.model_validate(
-                self.service.execute(
+                run_service.execute(
                     request,
                     run_id=run_id,
                 )

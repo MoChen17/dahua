@@ -21,3 +21,6 @@
 .metrics dt,.metrics dd{overflow-wrap:anywhere}
 @media(max-width:850px){.task-grid{grid-template-columns:1fr}}
 @media(max-width:850px){.estimate-panel,.estimate-panel dl,.agentdojo-metrics{grid-template-columns:1fr}}
+
+.findings{max-height:540px;overflow-y:auto;overscroll-behavior:contain;padding-right:8px}
+@media(max-width:700px){.findings{max-height:65vh}.config-fields{grid-template-columns:1fr}}
